@@ -1,0 +1,1484 @@
+---
+title: 'MovieLens: a movie recommendation system'
+author: "Rob Meekings"
+date: "10/12/2020"
+header-includes:
+   - \usepackage{fontspec}
+mainfont: Calibri
+output:
+  pdf_document: 
+    latex_engine: xelatex
+    toc: yes
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+# Use knitr to produce nicer tables in out output 
+knitr::opts_chunk$set(echo = TRUE, dev="cairo_pdf")
+options(digits = 3)
+
+```
+
+```{r libraries, echo=FALSE, message=FALSE, include=FALSE, warning=FALSE}
+# There are a number of libraries that we rely on in the development of the model
+# we have centralized the instalation and loading of these libraries here.
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+if(!require(kableExtra)) install.packages("kableExtra", repos = "http://cran.us.r-project.org")
+if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+if(!require(modi)) install.packages("modi", repos = "http://cran.us.r-project.org")
+if(!require(textdata)) install.packages("textdata", repos = "http://cran.us.r-project.org")
+if(!require(tidytext)) install.packages("tidytext", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(data.table)
+
+library(kableExtra)
+library(lubridate)
+library(modi)
+library(textdata)
+library(tidytext)
+
+```
+
+\newpage
+***
+## 1 Executive Summary
+
+1.1 This report summarizes the findings of exploratory data analysis performed on the MovieLens dataset to investigate the factors that influence how users of the MovieLens website rate movies. This analysis has informed a number of extensions to the recommendation system model developed as part of the HarvardX Data Science course. 
+
+1.2 The model presented in this paper scores a RMSE of 0.8649356. 
+
+1.3 The exploratory analysis raises a number of questions for further study and opportunities to further extend and develop the model. These are presented at the end of the paper along with some research questions that could go a long way to improving our understanding in this field.
+
+\newpage
+***
+## 2 Introduction
+
+2.1 This report summarizes the development and results of the MovieLens movie recommendation system, developed in R by Rob Meekings as part of the Data Science: Capstone module ([HarvardX PH125.9x](https://www.edx.org/course/data-science-capstone)). 
+
+2.2 The goal of this project is to train a machine learning algorithm on a subset of the MovieLens data (the *training* set) to correctly predict *movie* *ratings* in a subset of the MovieLens data that is not used in making predictions (known as the *test* or *validation* set).
+
+2.3 This report is intended to be read by someone familiar with the module and course content, as such the reader should be familiar with the R programming language and data science topics. 
+
+2.4 This report complies with the ([edX Honor Code](https://www.edx.org/edx-terms-service#honor-code)).
+
+\newpage
+***
+## 3 The MovieLens Data
+
+3.1 The source data for this project comes from the MovieLens dataset, which contains records of *ratings* assigned to *movies* by *users*. The data has been pre-processed using code provided to split it into *training* and *test* sets. 
+
+### Source code
+
+3.2 This source code, developed by HarvardX as part of the course materials for this project, is reproduced here:
+
+``` {r init, echo=TRUE, message=FALSE, results='hide', warning=FALSE}
+##########################################################
+# Create edx set, validation set (final hold-out test set)
+##########################################################
+
+# Note: this process could take a couple of minutes
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# if using R 3.6 or earlier:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+# if using R 4.0 or later:
+#movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+#                                           title = as.character(title),
+#                                           genres = as.character(genres))
+
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+
+3.3 This code produces two datasets, a *training* set called `edx` with 
+`r format(nrow(edx), big.mark=",")`
+rows, and a *test* set with 
+`r format(nrow(validation), big.mark=",")`
+records called `validation`, (which is
+`r scales::percent(nrow(validation)/(nrow(validation)+nrow(edx)))`
+of the total,) that we reserve for model validation. These datasets have the same structure, they both have
+`r ncol(edx)`
+columns:
+`r colnames(edx)`
+. 
+
+3.4 The *summary()* function, when applied to the `edx` dataset, gives us some information, but this is rather mechanical and not very enlightening:
+
+```{r summary, echo=FALSE, message=FALSE, warning=FALSE}
+# Get (rather uninformative) summary information 
+# knitr::kable produces nice tables for output
+# kable_styling is used to try and help pagination, to keep tables in position
+knitr::kable(summary(edx), caption="Summary of the edx dataset", booktabs=T) %>% 
+  kableExtra::kable_styling(full_width = F, latex_options = c("hold_position"))
+```
+
+\newpage
+***
+## 4 Exploratory Data Analysis
+
+4.1 We can better understand the data if we dig a little deeper into the distributions of *ratings*, relationships between the numbers of *movies* and *users*, and the distribution of these over time, represented in the data by *timestamps*, and *genre*. We can also look for any interactions between *titles*,  *genres* and other terms to see if they hold information that might tell us something about *ratings* or have predictive power.
+
+### Ratings
+
+4.2 *Ratings* are assigned to *movies* by *users*, it is assumed that the *user* has watched the *movie* in question and that the *ratings* are fair. The *rating* is represented by a number of stars, with a higher star *rating* denoting greater enjoyment or appreciation. The lowest *rating* that can be given is half a star, *ratings* rise by half star steps to the top *rating* of five stars. The historgram below summarizes the distribution of star *ratings*.
+
+```{r ratings, echo=FALSE, message=FALSE, warning=FALSE}
+# histogram of star ratings, bins = 2 * levels + 1
+edx %>% ggplot() +
+  geom_histogram(aes(x=rating), bins=19, fill="royalblue") + 
+  ggtitle("Total ratings by stars awarded")
+```
+
+4.3 It appears that there is a positive bias in ratings, perhaps there is a tendency for *users* to rate *movies* that they like. We can quantify this by observing that *ratings* have a mean
+`r mean(edx$rating)`
+and median of 
+`r median(edx$rating)`
+. 
+
+\newpage
+
+### Users and movies
+
+4.4 As a *rating* reflects the views of a single *user* about a particular *movie*, so the 
+`r format(nrow(edx), big.mark=",")`
+*ratings* in the dataset reflect the views of the
+`r format(nrow(distinct(edx,userId)), big.mark=",")`
+*users* of 
+`r format(nrow(distinct(edx,movieId)), big.mark=",")`
+*movies*, suggesting that each *user* has rated an average of 
+`r format(nrow(edx) / nrow(distinct(edx,userId)), big.mark=",")`
+*movies*, and that each *movie* has *ratings* from
+`r format(nrow(edx) / nrow(distinct(edx,movieId)), big.mark=",")`
+*users*. 
+
+4.5 We can examine the distribution of ratings by *user* and by *movie* to look at whether there are *users* who are more or less positive than the average, and whether there are *movies* that tend to get better or worse *ratings* than the average. First lets look at a histogram of *user* average *ratings*, our choice of bin size in the histogram affects how smooth the emerging bell curve appears.
+
+``` {r user_avg_ratg_dibn, echo=FALSE, message=FALSE, warning=FALSE}
+# store the mean rating
+mu <- floor(mean(edx$rating)*1000) / 1000
+
+# plot a histogram of avg ratings by user id with a ref line at the mean
+edx %>% group_by(userId) %>% 
+  summarize(avg_rating = mean(rating)) %>% 
+  ungroup() %>% 
+  select(avg_rating) %>% ggplot(aes(x=avg_rating)) +
+  geom_histogram(bins=17, fill="royalblue", alpha=0.8) + 
+  ggtitle("Distribution of user average ratings") +
+  geom_vline(xintercept = mu) +
+  geom_text(aes(x=mu-0.1, label=paste0("Mean rating = ", mu), y=5000), colour="black", angle=90, alpha=0.8)
+
+```
+
+4.6 The distribution of *users'* average *ratings* are distributed around the mean of all *ratings*, but with a slight positive skew. We see a similar pattern with the distribution of average *ratings* by *movie*.    
+
+``` {r movie_avg_ratg_dibn, echo=FALSE, message=FALSE, warning=FALSE}
+
+# plot a histogram of avg ratings by movie id with a ref line at the mean
+edx %>% group_by(movieId) %>% 
+  summarize(avg_rating = mean(rating)) %>% 
+  ungroup() %>% 
+  select(avg_rating) %>% ggplot(aes(x=avg_rating)) +
+  geom_histogram(bins=17, fill="royalblue", alpha=0.8) + 
+  ggtitle("Distribution of movie average ratings") +
+  geom_vline(xintercept = mu) +
+  geom_text(aes(x=mu-0.1, label=paste0("Mean rating = ", mu), y=1000), colour="black", angle=90, alpha=0.8)
+
+```
+
+4.7 The distribution of average *rating* by *user* and by *movie* look as if they are starting to approximate normal curves, to the extent that they can censored both above and below, with this becoming more apparent in a histogram as the number of bins increases. 
+
+4.8 We should check that we're not confounding *ratings* by *users* with *movies*, and vice versa, we can approach this by stratifying the data. This would happen if good movies were only rated by positive users and less popular movies were rated by negative users: the distribution of movies' average ratings would then reflect the distribution of the positivity of the users, rather than the popularity of the movies. To do this we can stratify the movies and users by average review, 
+
+``` {r conf_muq, echo=FALSE, message=FALSE, warning=FALSE}
+
+# find average rating by user
+uav <- edx %>% group_by(userId) %>% 
+  summarize(avg_rating = mean(rating), num_rating=n()) %>% 
+  ungroup() %>% 
+  select(userId, avg_rating, num_rating) 
+# find quintiles of avg rating for users 
+uq <- rep(0,6)
+for (i in 0:5) {
+  uq[i+1] <- weighted.quantile(x=uav$avg_rating, 
+                               w=uav$num_rating, 
+                               prob= i / 5, 
+                               plot=FALSE)
+}
+uq[6] = ifelse (is.na(uq[6]), 5, uq[6])
+# for unweighted quintiles use
+# uq <- quantile(uav$avg_rating, seq(0,1,0.2))
+
+# append quintile onto the user data
+uav$uq <- ifelse(uav$avg_rating <= uq[2], 1, 
+                 ifelse(uav$avg_rating <= uq[3], 2, 
+                        ifelse(uav$avg_rating <= uq[4], 3, 
+                               ifelse(uav$avg_rating <= uq[5], 4, 5))))
+
+
+# find average rating by movie
+mav <- edx %>% group_by(movieId) %>% 
+  summarize(avg_rating = mean(rating), num_rating=n()) %>% 
+  ungroup() %>% 
+  select(movieId, avg_rating, num_rating)
+# find quintiles of avg rating for movies
+mq <- rep(0,6)
+for (i in 0:5) {
+  mq[i+1] <- weighted.quantile(x=mav$avg_rating, w=mav$num_rating, prob= i / 5, plot=FALSE)
+}
+mq[6] = ifelse (is.na(mq[6]), 5, mq[6])
+
+# for unweighted quintiles would use:
+# mq <- quantile(mav$avg_rating, seq(0,1,0.2))
+
+# append quintile onto movie data
+mav$mq <- ifelse(mav$avg_rating <= mq[2], 1, 
+                 ifelse(mav$avg_rating <= mq[3], 2, 
+                        ifelse(mav$avg_rating <= mq[4], 3, 
+                               ifelse(mav$avg_rating <= mq[5], 4, 5))))
+
+# join the source data to the movie and user lists using the Id variables
+# then group by quitle pairs to get a grid with counts 
+muq <- inner_join(edx, mav[,-2], by="movieId") %>%
+  inner_join(., uav[,-2], by="userId") %>% 
+  group_by(uq, mq) %>%
+  summarize(count=n()) %>% 
+  ungroup() %>% 
+  select(uq, mq, count) 
+
+# Spread the dataset, prior to converting into a matrix
+smuq <- muq %>% spread(mq, count)
+
+#convert the totals table into a matrix for plotting with image() 
+mmuq <- as.matrix(smuq[,-1],5,5)
+
+#plot relative counts in an image grid
+image(x=c(1,2,3,4,5), 
+      y=c(1,2,3,4,5), 
+      z=mmuq, 
+      xlab="Movie quintile", 
+      ylab="User quintile")
+
+# garbage collection remove temp tables
+rm(uav, uq, mav, mq, muq, smuq, mmuq)
+```
+
+4.9 This image shows how the quintiles relate, with deeper colour indicating greater volume, there is an interaction between positivity of users and popularity of movies, because of the way we have defined our measure: it is hard to be a top quintile reviewer if you have given *movies* low scores. This gives rise to the saddle shape we see. What should reassure us is the spread in the middle: the *users* in the third quintile are almost evenly spread across all *movies* and likewise *movies* in the third quintile have reviews nearly evenly spread across the full range of *users*. If confounding was a significant factor we would expect the main diagonal to have all of the volume and very little elsewhere, which is not what we see here, and this suggests that the extent of any confounding is limited.
+
+4.10 These numbers, especially the average number of *movies* rated per *user*, look a little high, motivating further investigation. If we organise *users* into deciles, based on the number of *ratings* they have made, it appears that some *users* are significantly more prolific in the number of *ratings* they have made, skewing the average. 
+
+``` {r ratg_per_user, echo=FALSE, message=FALSE, warning=FALSE}
+# Get number of reviews by each user
+user_review_freq <- edx %>% 
+  group_by(userId) %>%
+  summarize(count=n()) %>%
+  ungroup() %>%
+  select(userId, count) 
+
+# Get quantiles of numbers of reviews
+q <- data.frame(#decile=c("0%", "10%", "20%", "30%", "40%", "50%",
+                 #              "60%", "70%", "80%", "90%", "100%"), 
+                    count=quantile(user_review_freq$count, seq(0,1,0.1)))
+
+# Resummarize to get number of users for each number of reviews, this is
+# used inline below to get the modal class
+count_freq <- user_review_freq %>%
+  group_by(count) %>%
+  summarize(users=n()) %>%
+  ungroup() %>%
+  select(count, users)
+
+# Output table of deciles
+knitr::kable(q, caption="Deciles of reviews per user", booktabs=T) %>% 
+  kableExtra::kable_styling(full_width = F, latex_options = c("hold_position"))
+
+# garbage collection remove temp tables
+rm(q)
+```
+
+4.11 This distribution is skewed towards many *users* submitting fewer *ratings*, the median number of *ratings* is 
+`r format(median(user_review_freq$count), big.mark=",")`
+, and the modal class is 
+`r format(count_freq$count[which.max(count_freq$users)] , big.mark=",")`
+. The extreme *users*, the *superusers* with thousands of reviews, may be system accounts uploading default *ratings* as new *movies* are added to the system. 
+
+4.12 Similarly some *movies* are more frequently rated, perhaps as a result of being more widely advertised, a *blockbuster* effect. We can see this by arranging *movies* into deciles by numbers of *ratings* and looking at the distribution.
+
+``` {r ratg_per_movie, echo=FALSE, message=FALSE, warning=FALSE}
+# Get number of reviews by each movie
+movie_review_freq <- edx %>% 
+  group_by(movieId) %>%
+  summarize(count=n()) %>%
+  ungroup() %>%
+  select(movieId, count)
+
+# Get quantiles of numbers of reviews
+qm <- data.frame(#decile=c("0%", "10%", "20%", "30%", "40%", "50%",
+                  #             "60%", "70%", "80%", "90%", "100%"), 
+                    count=quantile(movie_review_freq$count, seq(0,1,0.1)))
+
+# Resummarize to get number of moviess for each number of reviews, this is
+# used inline below to get the modal class
+mcount_freq <- movie_review_freq %>%
+  group_by(count) %>%
+  summarize(movies=n()) %>%
+  ungroup() %>%
+  select(count, movies)
+
+#Output table
+knitr::kable(qm, caption="Deciles of reviews per movie", booktabs=T) %>% 
+  kableExtra::kable_styling(full_width = F, latex_options = c("hold_position"))
+
+# garbage collection remove temp tables
+rm(qm)
+```
+
+4.13 Again, this distribution is skewed towards many *movies* having few *ratings*, whilst a few *blockbusters* have a very large number of ratings; the median number of *ratings* is 
+`r format(median(movie_review_freq$count), big.mark=",")`
+, and the modal class is 
+`r format(mcount_freq$count[which.max(mcount_freq$movies)], big.mark=",")`
+, with 
+`r format(mcount_freq[[which(mcount_freq$count == 1),2]], big.mark=",")`
+, (
+`r scales::percent(mcount_freq[[which(mcount_freq$count == 1),2]]/nrow(distinct(edx,movieId)))`
+) *movies* having only one review.
+
+\newpage
+
+### Superusers
+
+4.14 We can identify *superusers* in the data as the *users* responsible for the greatest number of ratings, we can set the threshold for being a *superuser* where we like, but the chart below looks at *superusers* as accounts that are associated with more than 5,000 reviews.
+
+``` {r superusers, echo=FALSE, message=FALSE, warning=FALSE}
+# Define a superuser as a user with more than a given number of reviews
+superuser_min <- 5000
+
+# Identify superusers in the data as users with a sufficient number of reviews
+superusers <- edx %>% 
+  group_by(userId) %>%
+  summarize(count=n()) %>%
+  ungroup() %>%
+  select(userId, count) %>%
+  filter(count > superuser_min)
+
+# Identify the reviews related to these superusers and get distribution by date
+su_reviews <- inner_join(edx, superusers, by="userId") 
+
+# Count the number of distinct *movies* reviewed by these superusers
+su_movie_count <- su_reviews %>% group_by(movieId) %>% summarize(count=n()) %>%
+  ungroup() %>% select(movieId, count) %>% nrow()
+
+# Load lubridate for date processing
+#library(lubridate)
+
+# Plot histograms of reviews by date based on the timestamp
+su_reviews %>% 
+  mutate(user=paste("User", userId), date=as_datetime(timestamp)) %>%
+  group_by(user, date) %>%
+  summarize(count=n()) %>%
+  ungroup() %>%
+  select(user, date, count) %>% 
+  ggplot(aes(x=date, group=user)) +
+  geom_histogram(bins=80, fill="royalblue") + 
+  facet_grid(user~.) + 
+  ggtitle("Ratings by superusers over time")
+
+```
+
+4.15 These *superusers* are responsible for reviews of 
+`r format(su_movie_count , big.mark=",")`
+*movies*, 
+`r scales::percent(su_movie_count / nrow(distinct(edx,movieId)))`
+of all *movies* in the `edx` dataset. Do *superusers* review differently to less prolific *users*? We can look at the distribution of *ratings* and compare across the two groups. 
+
+``` {R su_raw_ratings, echo=FALSE, message=FALSE, warning=FALSE}
+# Add flags to edx to identify superusers, save flags as factors
+flag_su <- left_join(edx, superusers, by="userId") %>% 
+  mutate(is_su=factor(ifelse(is.na(.$count), 0, 1), c(0,1), c("user", "superuser"))) 
+
+# Plot proportions of reviews by star rating
+flag_su %>% group_by(is_su, rating) %>%
+  summarize(num=n()) %>%
+  ungroup() %>%
+  select(is_su, rating, num) %>%
+  mutate(p_rating = ifelse(is_su == "superuser", 
+                           num / sum(flag_su$is_su == "superuser"), 
+                           num / sum(flag_su$is_su == "user"))) %>%
+  select(-num) %>%
+  ggplot(aes(x=rating, y=p_rating, fill=is_su, group=is_su)) +
+    geom_bar(position="dodge", stat="identity") 
+```
+
+4.16 Here we see that *superusers* appear to give slightly lower *ratings* on average, and are less extreme in the *ratings* they give. This is borne out by the more analytical summary of *ratings* by *users* and *superusers*, below. 
+
+``` {R su_sum_ratings, echo=FALSE, message=FALSE, warning=FALSE}
+# Summarize mean, median and sd of ratings by user type
+su_rtg_sum <- flag_su %>% group_by(is_su) %>%
+  summarize(Average = mean(rating), Median=median(rating), StdDev=sd(rating), Reviews=n()) %>%
+  ungroup() %>%
+  mutate(Type=is_su) %>%
+  select(Type, Average, Median, StdDev, Reviews)
+
+# Output as a table 
+knitr::kable(su_rtg_sum, caption="Rating distribution by user type", booktabs=T) %>% 
+  kableExtra::kable_styling(full_width = F, latex_options = c("hold_position"))
+```
+
+4.17 This analysis quantifies the extent to which *users* rate *movies* more highly than *superusers*, ranking *movies* a quarter of a star higher, on average. The lower standard deviation for *superusers* also demonstrates the greater central tendency amongst their ratings. 
+
+\newpage
+
+### Blockbusters
+
+4.18 We can take a similar approach to identify the *blockbusters*, *movies* that have been rated many times, to explore this further we will look at *movies* with more than 28,000 *ratings* - this cut-off is fairly arbitrary, but gives us five titles to consider, a manageable number.
+
+``` {r blockbusters, echo=FALSE, message=FALSE, warning=FALSE}
+# Define a blockbuster as a movie with more than a given number of reviews
+blockbuster_min <- 28000
+
+# Identify blockbusters in the data as movies with a sufficient number of reviews
+blockbusters <- edx %>% 
+  group_by(movieId, title) %>%
+  summarize(count=n()) %>%
+  ungroup() %>%
+  select(movieId, title, count) %>%
+  filter(count > blockbuster_min) %>%
+  arrange(desc(count))
+
+# Output a table with title and review count for our blockbusters
+blockbusters %>% 
+  select(title, count) %>% 
+  mutate(reviews=format(count, big.mark = ",")) %>% 
+  select(title, reviews) %>%
+  knitr::kable(., 
+             caption=paste("Blockbusters, movies with more than ",
+                           format(blockbuster_min, big.mark=","),
+                           " ratings"), booktabs=T) %>% 
+  kableExtra::kable_styling(full_width = F, latex_options = c("hold_position"))
+```
+
+4.19 This list of *blockbusters* makes some sense, these are films that are household names, but it is curious that this list is skewed towards films from quite a narrow 3-year window before the data collection period. This may be because the MovieLens data was intended for a specific use such as movie rentals, which might be heavily focused on recent films, whilst older films, such as *Star Wars* (9th in the list by ratings), or classics like *Gone with the Wind* (243rd), may have been available to watch on TV, or the demographic it was targeted at - in 2000 internet usage was much lower, below 50% in the US and 25% in the UK, and skewed towards the young and affluent. It is also interesting that *blockbusters* current at the time the data was collected, such as *Titanic* or *The Matrix* (56th and 23rd, respectively) do not feature more highly.
+
+``` {r blockbusters_time, echo=FALSE, message=FALSE, warning=FALSE}
+# Identify the reviews related to these superusers and get distribution by date
+bb_reviews <- inner_join(edx, blockbusters%>%select(-title), by="movieId") 
+
+# Count the number of distinct movies reviewed by these superusers
+bb_movie_count <- bb_reviews %>% group_by(userId) %>% summarize(count=n()) %>%
+  ungroup() %>% select(userId, count) %>% nrow()
+
+# Plot histograms of reviews by date based on the timestamp
+bb_reviews %>% 
+  mutate(date=as_datetime(timestamp), short=substr(title, 1, 15)) %>%
+  group_by(movieId, short, date) %>%
+  summarize(count=n()) %>%
+  ungroup() %>%
+  select(movieId, short, date, count) %>% 
+  ggplot(aes(x=date, group=short)) +
+  geom_histogram(bins=80, fill="royalblue") + 
+  facet_grid(gsub(" ", "\n", short)~.) + 
+  ggtitle("Ratings for blockbusters over time")
+```
+
+4.20 All of these *blockbusters* were from the early nineties, suggesting they would have been in recent memory in the early days of the MovieLens data. This recency puts a ceiling on how long ago a film was watched and therefore any *ratings* should better reflect the *users* view of the film, rather than their memory of their enjoyment of a half-forgotten film. What is interesting is that there appear to be very similar patterns in the volumes of reviews for these *blockbusters*. One hypothesis is that when *users* join they rate films that they recognise, the spikes would then correspond to recruitment activity. We can look for evidence of this in the data by comparing the distribution of reviews of one of our *blockbusters* (red), in this case *Forrest Gump*, to the distribution of first reviews (blue), taken as a proxy for recruitment. 
+
+``` {r blockbusters_first, echo=FALSE, message=FALSE, warning=FALSE}
+# Convert the timestamp to a date and then break the date down into parts
+edx_dt <- edx %>% mutate(date=as_datetime(timestamp), 
+                      year=year(date), 
+                      decade=year - year %% 10,
+                      yod=year %% 10,
+                      month=month(date), 
+                      day=day(date),
+                      week=week(date), 
+                      dow=wday(date),
+                      yrow=year - 1997 - ((year - 1997) %% 4),
+                      ycol=(year - 1997) %% 4) 
+
+# Identify first reviews by timestamp, using the earliest review date by user
+first_review_dates <- edx_dt %>%
+  group_by(userId) %>%
+  summarize(date=min(date)) %>%
+  ungroup() %>%
+  mutate(is_first = 1) %>%
+  select(userId, date, is_first)
+
+# Add a flag to the edx data to identify first reviews 
+first_reviews <- left_join(edx_dt, first_review_dates, by=c("userId", "date"))
+
+#Join blockbusters to first review flagged data, 
+# blockbusters will have a count value that is not NA
+blockbusters_first <- left_join(first_reviews, 
+                                blockbusters%>%select(-title), 
+                                by="movieId")
+
+# Find proportion of first reviews that feature one of the blockbusters 
+p_bb_first <- sum(!is.na(blockbusters_first$count) & !is.na(blockbusters_first$is_first)) / sum(!is.na(blockbusters_first$is_first))
+
+# Find proportion of all reviews that feature one of the blockbusters 
+p_bb <- sum(!is.na(blockbusters_first$count)) / nrow(blockbusters_first)
+
+#This next step gets memory intensive for many blockbusters
+has_bb_review <- sapply(blockbusters$movieId, function(blockbuster) {
+  edx$movieId == blockbuster
+}) %>% rowSums(.)
+
+# Count users with all five most reviewed movies
+all_five <- edx %>% mutate(bb=has_bb_review) %>%
+  group_by(userId) %>%
+  summarize(bbs=sum(bb)) %>%
+  ungroup() %>%
+  select(userId, bbs) %>%
+  filter(bbs == 5) %>%
+  nrow(.)
+
+# Get distribution of recruitment based on first reviews
+rm <- first_review_dates %>% 
+  mutate(review_date = round_date(date, unit="month")) %>% 
+  group_by(review_date) %>% 
+  summarize(reviews = n() / nrow(first_review_dates)) %>% 
+  ungroup() %>% 
+  select(review_date, reviews) 
+
+# Get distribution of Forrest Gump reviews over time
+fg <- bb_reviews %>%  
+  filter(title == "Forrest Gump (1994)") %>%
+  mutate(review_date = round_date(as_datetime(timestamp), unit="month")) %>% 
+  group_by(movieId, review_date) %>%
+  summarize(count=n() / sum(bb_reviews$title == "Forrest Gump (1994)")) %>%
+  ungroup() 
+
+# Plot the two series
+ggplot() +
+  geom_line(aes(x=fg$review_date, y=fg$count),color="red") +
+  geom_line(aes(x=rm$review_date, y=rm$reviews), colour="blue") +
+  ggtitle("Blockbuster reviews and recruitment over time") +
+  xlab("Review date") +
+  ylab("Reviews (proportion)") +
+  scale_colour_manual(name = 'Legend', 
+         values = c("blue"="blue","red"="red"), 
+         labels = c("Recruitment","Forrest Gump"))
+
+```
+
+4.21 The evidence suggests that there is a recruitment effect, 
+`r scales::percent(p_bb_first)`
+of first reviews are of one of these five blockbusters, whilst these reviews only make up 
+`r scales::percent(p_bb)`
+of all reviews, 
+`r p_bb_first/ p_bb`
+more likely than average. If we reduce the blockbuster threshold this becomes more marked. Further evidence is given by the fact that 
+`r scales::percent(all_five / nrow(distinct(edx,userId)))`
+of *users* have reviewed all five of these movies. This may have been part of an on-boarding process that asked *users* to rank familiar films. 
+
+\newpage
+
+### Seasonality and the time component
+ 
+4.22 In this section we will look at whether there appears to be seasonality in rating scores or the numbers of reviews.  The chart below summarizes the distribution of *ratings* over the course of each year, with each line representing a year. These lines have been smoothed to look for patterns that repeat in subsequent years, such trends would represent seasonality. We start by looking at the number of reviews made in each year.
+
+``` {r ratings_year, echo=FALSE, message=FALSE, warning=FALSE}
+# Summarize reviews by year and rating
+yr <- edx_dt %>% 
+  filter(year > 1996 & year < 2009) %>%
+  group_by(year, rating) %>% 
+  summarize(ratings=n()) %>%
+  ungroup() %>%
+  select(year, rating, ratings) 
+
+# Plot numbers of reviews by year, segment bars by rating
+yr %>% mutate(stars=as.character(rating)) %>%
+  ggplot(aes(x=year, y=ratings, fill=stars, group=stars)) +
+  geom_bar(position="stack", stat="identity") + 
+  ggtitle("Totals ratings by year and rating") 
+```
+
+4.23 We notice that from 2001 the number of *ratings* in each year has been fairly steady, although with a bit of a dip in 2002 and a spike in 2005. Before 2001 the data is much more volatile perhaps as the *rating* platform gained users. 
+
+``` {r ratings_year_stacked, echo=FALSE, message=FALSE, warning=FALSE}
+# Plot stacked bars of reviews by year, segment bars by rating
+yr %>% mutate(stars=as.character(rating)) %>%
+  ggplot(aes(x=year, y=ratings, fill=stars, group=stars)) +
+  geom_bar(position="fill", stat="identity") + 
+  ggtitle("Totals ratings by year and rating (stacked bars)") 
+
+# Look at half scores
+half_scores <- edx_dt %>% filter(rating %in% c(0.5, 1.5, 2.5, 3.5, 4.5)) 
+# Find earliest date
+first_half_score_date <- min(half_scores$date)
+
+```
+
+4.24 We saw earlier (in section 4.2) that half star *ratings* are less frequent than full star *ratings* in the data. This chart may go some way to explaining this. It appears that half stars were introduced mid way through the collection of the data, perhaps an attempt to boost popularity with a new feature after the decline in *ratings* seen from 2000-2002. The earliest half star review was recorded on
+`r format(first_half_score_date, "%d %b %Y")`
+.
+
+4.25 Whilst looking at trends over time it was noticed that there were some weeks where the number of reviews was very low, further investigation identified some weeks missing from the data, perhaps when the system was taken down for maintenance.
+
+``` {r missing_weeks, echo=FALSE, message=FALSE, warning=FALSE}
+# Summarize the number of ratings per week
+yw <- edx_dt %>% 
+  filter(year > 1996 & year < 2009) %>%
+  group_by(year, yrow, ycol, week) %>% 
+  summarize(ratings=n(), avg_rating=sum(rating)/n()) %>%
+  ungroup() %>%
+  select(year, yrow, ycol, week, ratings, avg_rating) 
+
+# Add all possible years and weeks
+all_yw <- crossing(year=c(1997:2008), week=c(1:53))  
+# Find years and weeks that are possible but missing from our data
+missing_yw <- anti_join(all_yw, yw, by = c("year", "week")) 
+# output this table
+#library(kableExtra)
+knitr::kable(missing_yw, 
+             caption="Weeks with no ratings", booktabs=T) %>% 
+  kableExtra::kable_styling(full_width = F, latex_options = c("hold_position"))
+```
+
+4.26 For illustrative purposes these points have been added back in to the weekly data and are highlighted in orange, in the charts below. These panelled charts (in which year 0 is 1997) allow the seasonal trends by year to be compared and also the changes between years.
+
+``` {r rating_chart, echo=FALSE, message=FALSE, warning=FALSE}
+# Add cols for charting
+missing_yw <- missing_yw %>% 
+  mutate(ratings=9, 
+         yrow=year - 1997 - ((year - 1997) %% 4),
+         ycol=(year - 1997) %% 4)
+# Plot seasonality by year
+yw %>% ggplot(aes(x=week, y=ratings, group=year)) +
+  geom_point(alpha=0.2) +
+  geom_point(data=missing_yw, 
+             aes(x=week, y=ratings, group=year), color="orange") +
+  geom_smooth(aes(x=week, y=ratings), 
+              se=FALSE, 
+              method=loess, 
+              method.args = list(degree=1, span=0.25)) +
+  scale_y_log10() +
+  ggtitle("Movie rating seasonality by year (year 0 is 1997)") +
+  facet_grid(yrow ~ ycol) 
+```
+
+4.27 The charts show a step change in the numbers of *ratings* in the last third of 1999, (top row, third chartlet,) when weekly *ratings* jump from fewer than one thousand per week to weekly figures in the tens of thousands. This correlates with the jump in blockbuster *ratings* in late 1999 that we saw earlier (4.13). Further, the volatility in the data in the early years seems to drop out from 2002 (second chartlet, second row) onwards. Note that week 53, the last observation in each chart is lower than other weeks because the last week of the year does not have a full seven days. 
+
+``` {r avgrating_chart, echo=FALSE, message=FALSE, warning=FALSE}
+
+# Plot seasonality by year
+yw %>% ggplot(aes(x=week, y=avg_rating, group=year)) +
+  geom_point(alpha=0.2) +
+  geom_smooth(aes(x=week, y=avg_rating), 
+              se=FALSE, 
+              method=loess, 
+              method.args = list(degree=1, span=0.3)) +
+  scale_y_log10() +
+  ggtitle("Movie rating scores by year (year 0 is 1997)") +
+  facet_grid(yrow ~ ycol) 
+
+```
+
+4.28 The lack of a clear repeating pattern across these lines suggests that there is not a clear seasonality in numbers of *movie* *ratings* posted each week, but that there are trends in the number of *movies* rated in a year. A similar chart, looking at the average *rating* by week also shows no clear trend; in this chart the lines for 2004 and 2005, for example, appear to be mirror opposites.
+
+### Half-stars
+ 
+4.29 We digress briefly to consider the impact of the introduction of half scores on average ratings. Earlier (4.11) we looked at how *ratings* by *users* and *superusers* differed, and found that *users* gave a wider range of *ratings* and were generally more positive. We can repeat that analysis on partitions of the data before and after half scores were introduced.
+
+``` {R conf_su_nohalf, echo=FALSE, message=FALSE, warning=FALSE}
+# Add a flag to identify whether half scores were available 
+edx_dt <- edx_dt %>% mutate(half_scores = factor(
+  ifelse(date>=first_half_score_date, 1, 0), c(0,1), c("N", "Y")))
+
+# Add superuser flag
+flag_sub <- left_join(edx_dt, superusers, by="userId") %>% 
+  mutate(is_su=factor(ifelse(is.na(.$count), 0, 1), c(0,1), c("user", "superuser"))) 
+
+# Get dibn by superuser and half_scores
+flag_sub_plot <- flag_sub %>% group_by(half_scores, is_su, rating) %>%
+  summarize(num=n()) %>%
+  ungroup() %>%
+  select(half_scores, is_su, rating, num) %>%
+  mutate(p_rating = ifelse(half_scores == "Y", 
+                           ifelse(is_su == "superuser", 
+                                  num / sum(flag_sub$is_su == "superuser" & flag_sub$half_scores == "Y"), 
+                                  num / sum(flag_sub$is_su == "user" & flag_sub$half_scores == "Y")),
+                           ifelse(is_su == "superuser", 
+                                  num / sum(flag_sub$is_su == "superuser" & flag_sub$half_scores == "N"), 
+                                  num / sum(flag_sub$is_su == "user" & flag_sub$half_scores == "N")))) 
+
+# Plot dibns before half scores were introduced
+flag_sub_plot %>% select(-num) %>% filter(half_scores == "N") %>%
+  ggplot(aes(x=rating, y=p_rating, fill=is_su, group=is_su, ylab("Proportion"))) +
+  geom_bar(position="dodge", stat="identity") +
+  ggtitle("Comparison of ratings between users and superusers before half stars")
+
+# Table of means 
+knitr::kable(flag_sub_plot %>% filter(half_scores == "N") %>% 
+  group_by(is_su) %>%
+  summarize(avg_rating = sum(rating * num) / sum(num), tot=sum(num)) %>%
+  ungroup() %>%
+  select(is_su, avg_rating) %>%
+  spread(., is_su, avg_rating), 
+             caption="Mean ratings by user type before half stars", booktabs=T) %>% 
+  kableExtra::kable_styling(full_width = F, latex_options = c("hold_position"))
+```
+
+4.30 The *superusers*, before the introduction of half stars, were very conservatively positive in their ratings, with nearly 92% of *ratings* being of three or four stars. Because *superusers* only very rarely found *movies* worthy of five stars their average *rating* is lower than that of less prolific users.
+
+```{R conf_su_halves, echo=FALSE, message=FALSE, warning=FALSE}
+# Plot dibns after half scores were introduced
+flag_sub_plot %>% select(-num) %>% filter(half_scores == "Y") %>%
+  ggplot(aes(x=rating, y=p_rating, fill=is_su, group=is_su, ylab("Proportion"))) +
+  geom_bar(position="dodge", stat="identity") +
+  ggtitle("Comparison of ratings between users and superusers with half stars")
+
+# Table of means 
+knitr::kable(flag_sub_plot %>% filter(half_scores == "Y") %>% 
+  group_by(is_su) %>%
+  summarize(avg_rating = sum(rating * num) / sum(num), tot=sum(num)) %>%
+  ungroup() %>%
+  select(is_su, avg_rating) %>%
+  spread(., is_su, avg_rating), 
+             caption="Mean ratings by user type with half stars", booktabs=T) %>% 
+  kableExtra::kable_styling(full_width = F, latex_options = c("hold_position"))
+```
+
+4.31 With the introduction of half stars, *superuser* *ratings* became more nuanced and the average *rating* dropped by 0.2 points, this trend was also observed amongst general users, although the drop in *ratings* was less pronounced. There is still the risk, here, that the choice of *movies* reviewed, accounts for some of the difference. By restricting the reviews we analyze to the *movies* rated by the *superusers* we can account for this, and discover the impact on the mean *ratings* below. 
+
+``` {R conf_su_nohalf_m, echo=FALSE, message=FALSE, warning=FALSE}
+# Get summary stats for ratings by users and superusers after the introduction of 
+# half stars
+
+superuser_movies <- flag_sub %>% 
+  filter(is_su == "superuser") %>% 
+  group_by(movieId) %>% 
+  summarize(num=n()) %>% 
+  ungroup() %>% 
+  select(movieId)
+
+# Join superuser reviewed movies to movie list
+flag_subm <- inner_join(flag_sub, superuser_movies, by="movieId")
+
+# Prep data for plotting, group by availability of half scores, superuser and rating
+flag_subm_plot <- flag_subm %>% group_by(half_scores, is_su, rating) %>%
+  summarize(num=n()) %>%
+  ungroup() %>%
+  select(half_scores, is_su, rating, num) %>%
+  mutate(p_rating = ifelse(half_scores == "Y", 
+                           ifelse(is_su == "superuser", 
+                                  num / sum(flag_subm$is_su == "superuser" & flag_subm$half_scores == "Y"), 
+                                  num / sum(flag_subm$is_su == "user" & flag_subm$half_scores == "Y")),
+                           ifelse(is_su == "superuser", 
+                                  num / sum(flag_subm$is_su == "superuser" & flag_subm$half_scores == "N"), 
+                                  num / sum(flag_subm$is_su == "user" & flag_subm$half_scores == "N")))) 
+
+# Output summary table
+knitr::kable(flag_subm_plot %>% filter(half_scores == "N") %>% 
+  group_by(is_su) %>%
+  summarize(avg_rating = sum(rating * num) / sum(num), tot=sum(num)) %>%
+  ungroup() %>%
+  select(is_su, avg_rating) %>%
+  spread(., is_su, avg_rating), 
+             caption="Mean ratings of common movies by user type before half stars", booktabs=T) %>% 
+  kableExtra::kable_styling(full_width = F, latex_options = c("hold_position"))
+```
+
+4.32 Mean *ratings* by *superusers* and *users* before the introduction of half stars with reviews restricted to the *movies* that *superusers* rated, above, and when half stars were available, below.
+
+``` {R conf_su_halves_m, echo=FALSE, message=FALSE, warning=FALSE}
+
+knitr::kable(flag_subm_plot %>% filter(half_scores == "Y") %>% 
+  group_by(is_su) %>%
+  summarize(avg_rating = sum(rating * num) / sum(num), tot=sum(num)) %>%
+  ungroup() %>%
+  select(is_su, avg_rating) %>%
+  spread(., is_su, avg_rating), 
+             caption="Mean ratings of common movies by user type with half stars", booktabs=T) %>% 
+  kableExtra::kable_styling(full_width = F, latex_options = c("hold_position"))
+
+```
+
+4.33 We see that controlling for *movie* choice does not make a significant difference, and because of this we have not reproduced the corresponding charts.
+
+\newpage
+
+### Genres
+ 
+4.34 The reviews are classified by *genre*, this lists one or more categories that describes the type of *movie*, so we might expect a romantic comedy to be categorized as "Comedy|Romantic". From the constructor code for the `edx` dataset it appears that *genre* is set per *movie*, rather than varying per *user review*.  
+
+``` {R extract_genres, echo=FALSE, message=FALSE, warning=FALSE}
+#load 
+#library(tidytext)
+#library(textdata)
+
+afinn <- get_sentiments("afinn")
+
+# Create a distinct list of movies 
+movies <- edx %>% 
+  group_by(movieId, title, genres) %>%
+  summarize(num=n(), avg_rating=mean(rating)) %>%
+  ungroup() %>%
+  select(movieId, title, genres, num, avg_rating)
+
+# Create a distinct list of genres
+genre_list <- movies %>%
+  group_by(genres) %>%
+  summarize(movies=sum(num)) %>%
+  ungroup() %>%
+  select(genres) 
+
+# Split the genres by pipe (|)
+g <- str_split(genre_list$genres, "\\|")
+
+# Count how many elements we've split into, get the max
+n <- 0
+for (i in 1:length(g)) {
+  n <- ifelse(length(g[[i]]) > n, length(g[[i]]), n)
+}
+
+# Now create a matrix, row per genre, column per genre element
+m <- matrix(data="", nrow=length(g), ncol=n)
+# Loop over rows
+for (i in 1:length(g)) {
+  # Loop over cols
+  for (j in 1:n) {
+    # if the i'th row has j or more elements place the jth 
+    # element into cell i,j of the matrix m
+    m[i,j] <- ifelse(length(g[[i]]) >= j, str_replace(g[[i]][[j]], "-", "."), "")
+    
+  }
+}
+# Use set union to get a distinct list, use relative col refs
+# to avoid naming cols, etc
+cats <- union(union(union(m[,1], m[,2]),
+              union(m[,3], m[,4])),
+              union(union(m[,5], m[,6]),
+                    union(m[,7], m[,8]))) %>% 
+  .[-length(.)] %>% # drop the last entry ""
+  .[-1]             # drop the first entry "(no genres listed)"
+
+#Create a variable that indicates if one of the columns matches the category
+categories <- sapply(cats, function(cat){
+  sign(ifelse(m[,1]==cat, 1, 0) + ifelse(m[,2] == cat, 1, 0) +
+         ifelse(m[,3]==cat, 1, 0) + ifelse(m[,4] == cat, 1, 0) +
+         ifelse(m[,5]==cat, 1, 0) + ifelse(m[,6] == cat, 1, 0) +
+         ifelse(m[,7]==cat, 1, 0) + ifelse(m[,8] == cat, 1, 0))
+})
+# Assign names to the category list
+names(categories) = cats
+# Add the category indicators to the genre list
+genre_list <- genre_list %>% mutate(data.frame(categories))
+# Add the category indicators to the movie list
+movies_genres <- inner_join(movies, genre_list, by="genres")
+# Get counts by category, store counts in cat_counts
+cat_counts <- seq(1:length(cats))
+for (j in 1:length(cats)) {
+  cat_counts[j] <- sum(movies_genres[,j+4] * movies_genres$num)
+}
+# Add category names to the count data 
+cat_counts <- data.frame(category=cats, counts=cat_counts)
+
+# sort into descending order by count
+cat_counts <- cat_counts[order(-cat_counts$counts),]
+
+# Format counts for output
+cat_counts <- cat_counts %>% 
+  mutate(reviews = format(counts,big.mark=",")) %>% 
+  select(category, reviews)
+
+# Output a table
+knitr::kable(cat_counts, 
+             caption="Reviews by category", booktabs=T) %>% 
+  kableExtra::kable_styling(full_width = F, latex_options = c("hold_position"))
+
+```
+
+4.35 Note that because a *movie* can be assigned to more than one category the total sum of all *movies* across all categories is greater than the total number of movies: *movies* have been counted against each of the categories they are assigned to. Now we look at how the use of categories varies over time.
+
+``` {R cat_nums, echo=FALSE, message=FALSE, warning=FALSE}
+# Add genres back on to the source data
+edx_genre <- inner_join(edx_dt, genre_list, by="genres")
+
+cat_sums <- edx_genre %>% 
+  select(all_of(cats)) %>% 
+  rowSums(.) %>% 
+  data.frame(categories = ., date=edx_dt$date, rating=edx_dt$rating) 
+
+cat_sums_dt <- cat_sums %>% 
+  mutate(date=date(date)) %>%
+  group_by(categories, date) %>% 
+  summarize(count = n(), avg_rating = mean(rating)) %>%
+  ungroup() %>%
+  mutate(genres=as.character(categories)) %>%
+  select(genres, date, count, avg_rating) 
+
+cat_sums_dt %>% 
+  ggplot(aes(x=date, y=count, color=genres, group=genres)) +
+  geom_point(alpha=0.2) +
+  geom_smooth(method="loess", method.args = list(degree=1, span=0.25)) +
+  scale_y_log10() +
+  ggtitle("Multiple category use in movie classification over time") 
+
+```
+
+4.36 We can see that the anomalously low volumes in 1998, discussed in section 3.x, are visible here, we also notice that the number of categories in use has stayed broadly level over time, although the first seven-part catgeory was added in 1999, and the first eight-part category was added in 2007. It is natural to ask what part categories play, do they allow *users* to be more selective and does the number of categories therefore improve rankings? Are all categories equal and how do rankings of combinations correspond to rankings of individual categories?
+
+4.37 If we are going to use genre-based categories in our prediction model we want to look at how discriminative the category is, the extent to which movies that are members of a category score differently to non-members. For a category to have a significant impact on our modelling we need it to have a large membership.
+
+``` {R cat_preds, echo=FALSE, message=FALSE, warning=FALSE}
+# Create a data frame for categories, look at how category members vary from the mean
+dfcats <- data.frame(cats)
+dfcats$num <- rep(0, nrow(dfcats))
+dfcats$pos <- rep(0, nrow(dfcats)) # pos will store avg ratings for category members
+dfcats$neg <- rep(0, nrow(dfcats)) # neg will store avg ratings for the rest 
+
+# For each category get mean rating, mean of movies 
+# not in category, and size of category
+# Looping doesn't work easily with named columns, but few enough to list
+dfcats$pos[1] <- mean(edx_genre[Action == 1, ]$rating) 
+dfcats$neg[1] <- mean(edx_genre[Action == 0, ]$rating)
+dfcats$num[1] <- sum(edx_genre$Action)
+
+dfcats$pos[2] <- mean(edx_genre[Adventure == 1, ]$rating) 
+dfcats$neg[2] <- mean(edx_genre[Adventure == 0, ]$rating) 
+dfcats$num[2] <- sum(edx_genre$Adventure)
+
+dfcats$pos[3] <- mean(edx_genre[Animation == 1, ]$rating) 
+dfcats$neg[3] <- mean(edx_genre[Animation == 0, ]$rating) 
+dfcats$num[3] <- sum(edx_genre$Animation)
+
+dfcats$pos[4] <- mean(edx_genre[Children == 1, ]$rating) 
+dfcats$neg[4] <- mean(edx_genre[Children == 0, ]$rating) 
+dfcats$num[4] <- sum(edx_genre$Children)
+
+dfcats$pos[5] <- mean(edx_genre[Comedy == 1, ]$rating) 
+dfcats$neg[5] <- mean(edx_genre[Comedy == 0, ]$rating) 
+dfcats$num[5] <- sum(edx_genre$Comedy)
+
+dfcats$pos[6] <- mean(edx_genre[Crime == 1, ]$rating) 
+dfcats$neg[6] <- mean(edx_genre[Crime == 0, ]$rating) 
+dfcats$num[6] <- sum(edx_genre$Crime)
+
+dfcats$pos[7] <- mean(edx_genre[Documentary == 1, ]$rating) 
+dfcats$neg[7] <- mean(edx_genre[Documentary == 0, ]$rating) 
+dfcats$num[7] <- sum(edx_genre$Documentary)
+
+dfcats$pos[8] <- mean(edx_genre[Drama == 1, ]$rating) 
+dfcats$neg[8] <- mean(edx_genre[Drama == 0, ]$rating) 
+dfcats$num[8] <- sum(edx_genre$Drama)
+
+dfcats$pos[9] <- mean(edx_genre[Fantasy == 1, ]$rating) 
+dfcats$neg[9] <- mean(edx_genre[Fantasy == 0, ]$rating) 
+dfcats$num[9] <- sum(edx_genre$Fantasy)
+
+dfcats$pos[10] <- mean(edx_genre[Film.Noir == 1, ]$rating) 
+dfcats$neg[10] <- mean(edx_genre[Film.Noir == 0, ]$rating) 
+dfcats$num[10] <- sum(edx_genre$Film.Noir)
+
+dfcats$pos[11] <- mean(edx_genre[Horror == 1, ]$rating) 
+dfcats$neg[11] <- mean(edx_genre[Horror == 0, ]$rating) 
+dfcats$num[11] <- sum(edx_genre$Horror)
+
+dfcats$pos[12] <- mean(edx_genre[IMAX == 1, ]$rating) 
+dfcats$neg[12] <- mean(edx_genre[IMAX == 0, ]$rating) 
+dfcats$num[12] <- sum(edx_genre$IMAX)
+
+dfcats$pos[13] <- mean(edx_genre[Musical == 1, ]$rating)
+dfcats$neg[13] <- mean(edx_genre[Musical == 0, ]$rating)
+dfcats$num[13] <- sum(edx_genre$Musical)
+
+dfcats$pos[14] <- mean(edx_genre[Mystery == 1, ]$rating) 
+dfcats$neg[14] <- mean(edx_genre[Mystery == 0, ]$rating) 
+dfcats$num[14] <- sum(edx_genre$Mystery)
+
+dfcats$pos[15] <- mean(edx_genre[Romance == 1, ]$rating) 
+dfcats$neg[15] <- mean(edx_genre[Romance == 0, ]$rating) 
+dfcats$num[15] <- sum(edx_genre$Romance)
+
+dfcats$pos[16] <- mean(edx_genre[Sci.Fi == 1, ]$rating) 
+dfcats$neg[16] <- mean(edx_genre[Sci.Fi == 0, ]$rating) 
+dfcats$num[16] <- sum(edx_genre$Sci.Fi)
+
+dfcats$pos[17] <- mean(edx_genre[Thriller == 1, ]$rating) 
+dfcats$neg[17] <- mean(edx_genre[Thriller == 0, ]$rating) 
+dfcats$num[17] <- sum(edx_genre$Thriller)
+
+dfcats$pos[18] <- mean(edx_genre[War == 1, ]$rating) 
+dfcats$neg[18] <- mean(edx_genre[War == 0, ]$rating) 
+dfcats$num[18] <- sum(edx_genre$War)
+
+dfcats$pos[19] <- mean(edx_genre[Western == 1, ]$rating)
+dfcats$neg[19] <- mean(edx_genre[Western == 0, ]$rating)
+dfcats$num[19] <- sum(edx_genre$Western)
+
+# Get the difference in mean rating between 
+dfcats$diff <- dfcats$pos - dfcats$neg
+
+# We want genres that will separate ratings so want diff to be large
+dfcats <- dfcats[order(-abs(dfcats$diff)),]
+
+knitr::kable(dfcats, 
+             caption="Category reviews", booktabs=T) %>% 
+  kableExtra::kable_styling(full_width = F, latex_options = c("hold_position"))
+
+```
+
+4.38 From this list it looks as if *Film Noir* should be the most predictive category, but notice that it is comparatively small. Of the larger categories *Drama* appears to be the most impactful. We haven't explored interactions in categories, for example do rom coms (Romantic Comedies) score more like Romance + Comedy. 
+
+\newpage
+
+### Titles
+ 
+4.39 Movie titles are stored in the data as text, and the title text includes the release year, in parentheses, at the end. Our first step in processing the titles is therefore to remove the year; we will store it as a variable and investigate whether it has predictive power. 
+
+```{R process_titles, echo=FALSE, message=FALSE, warning=FALSE}
+# Years are four digits, in brackets at the end of the title
+year_regex <- "\\(\\d{4}\\)$"
+
+# Extract years and remove from titles
+movies <- movies %>% 
+  mutate(release_year = 
+    str_replace_all(str_extract(title, year_regex), "\\(|\\)",""),
+    title = str_replace(title, year_regex, ""))
+
+# Convert release years from character to numeric
+movies <- movies %>% mutate(ry = ifelse(release_year =="", NA,
+  ifelse(str_detect(release_year, "\\d{4}") > 0, as.integer(release_year), NA))) %>%
+  select(-release_year) %>%
+  rename(release_year = ry)
+
+# Plot distribution of movies by release year
+movies %>% filter(!is.na(release_year)) %>% 
+  group_by(release_year) %>%
+  summarize(movies = n()) %>%
+  ungroup %>%
+  select(release_year, movies) %>%
+  ggplot(aes(x=release_year, y=movies)) +
+    geom_bar(stat="identity", fill="royalblue") +
+    scale_x_continuous(breaks=seq(1900,2020,10)) +
+    labs(title="Movie releases by year", 
+         xlab="Release year", 
+         ylab="Number of movies")
+
+```
+
+4.40 The number of releases rises gradually through the first decades of cinema before accelerating from the 1980s to the mid 1990s when numbers of releases levelled off. There is a marked drop in 2008, this may be due to the financial crisis of that year, or a censoring of releases that were near contemporaries of the compilation of the dataset.
+
+```{R ratings_release, echo=FALSE, message=FALSE, warning=FALSE}
+
+movies %>% mutate(ry = paste(release_year, "")) %>%
+  ggplot(aes(x=ry, y=avg_rating, group=ry, weight=num)) +
+  geom_boxplot() +
+  scale_x_discrete(breaks=seq(1900,2020,10)) +
+  labs(title="Average movie rating by release year", 
+       xlab="Release year", 
+       ylab="Average rating")
+
+```
+
+4.41 The average *rating* by year is volatile, but, with a few exceptions, for most of the period has hovered around four stars. Films released in more recent years seem to attract more criticism and the average *ratings* trending towards 3.5 stars and the lowest *ratings* are lower. 
+
+4.42 Having extracted release year we are ready to start processing the titles. The hope in doing this is that titles influence viewers by setting expectations: that, in some sense, an effective title should be reflected by better than average reviews. Our hypothesis is that a title whose sentiment is aligned to its genre will fare relatively better. To investigate this we start by using similar string splitting techniques to those used for genres in section 4.34, above. 
+
+```{R split_titles, echo=FALSE, message=FALSE, warning=FALSE}
+# Convert punctuation to spaces, and split titles by spaces
+t <- str_split(str_replace_all(movies$title, "[:punct:]", " "), "\\s")
+
+# See how many words the most wordy movie name is.  
+n <- 0
+for (i in 1:length(t)) {
+  n <- ifelse(length(t[[i]]) > n, length(t[[i]]), n)
+}
+
+# Now create a matrix, row per genre, column per genre element
+m <- matrix(data="", nrow=length(t), ncol=n)
+# Loop over rows
+for (i in 1:length(t)) {
+  # Loop over cols
+  for (j in 1:n) {
+    # if the i'th row has j or more elements place the jth 
+    # element into cell i,j of the matrix m
+    m[i,j] <- ifelse(length(t[[i]]) >= j, t[[i]][[j]], "")
+  }
+}
+# Add column names and convert to a data frame
+names(m) <- c(1:n)
+m <- data.frame(movieId=movies$movieId, m) 
+
+```
+
+4.43 Reviewing the list of titles, having split the words, the longest appears to be *Every Man for Himself and God Against All a.k.a. The Enigma of Kaspar Hauser a.k.a. The Mystery of Kaspar Hauser: Jeder für sich und Gott gegen alle)*. This suggests the unanticipated presence of foreign language films in the sample, and makes us ask if we can we classify these effectively, either by language or binarily as English/non-English. We could potentially derive a number of variables from the title such as length and an analysis of n-grams, (groups of words within a title that do, or do not, often fit together,) whilst this might be valuable, this is beyond the scope of the present work. The chart below illustrates the idea: *movies* with two-word titles are not rated very highly, adding words to the title seems to improve *ratings* until titles become unwieldly beyond 13 words, above this the pattern is less obvious due to the scarcity of the data. 
+
+``` {r title_length_rating, echo=FALSE, message=FALSE, warning=FALSE}
+# Add a variable for the number of (non-empty) words
+m <- m %>% mutate(word_count=0)
+
+# Loop through the columns of the matrix and set the count based on the first
+# non-empty column counting down
+for (i in seq(length(m)-1, 2, -1)) {
+  m$word_count = ifelse(m[,i] != "" & m$word_count == 0, i - 1,  m$word_count)
+}
+
+# Create a box plot illustrating any relationship between title length and rating.
+data.frame(m$word_count, movies$avg_rating) %>% 
+  ggplot(aes(x=m.word_count, y=movies.avg_rating, group=m.word_count)) +
+  geom_boxplot() +
+  ggtitle("Title length and average rating") +
+  xlab("Title length (words)") +
+  ylab("Average rating")
+
+```
+
+\newpage
+
+### Sentiment analysis
+ 
+4.44 We start our sentiment analysis by converting the words to lower case and excluding stop words. We will try using the Afinn lexicon which should give each word a score between -5 and 5, we will average these. This is a very simple choice of aggregate sentiment metric, under this meaure the most postively and negatively scored titles are listed below.
+
+``` {R sentiment_scoring, echo=FALSE, message=FALSE, warning=FALSE}
+# To further process this data we normalize it so each row relates to a word
+x <- m %>% gather(idx, word, -movieId) %>% 
+  filter(!word == "") %>% 
+  mutate(word = str_to_lower(word)) %>%
+  arrange(movieId, idx) %>% 
+  mutate(word_index=as.integer(substr(idx,2,2))) %>% 
+  select(-idx) 
+
+# Now convert words to lower case and remove stop words 
+# then get a list of distinct words
+wds <- x %>% 
+  mutate(word = str_to_lower(word)) %>%     # convert to lower case
+  filter(!word %in% stop_words$word ) %>%   # remove stop words
+  group_by(word) %>%                        # get a distinct list
+  summarize(count=n()) %>%
+  ungroup %>%
+  select(word, count) %>%
+  arrange(desc(count))                      # sort by frequency
+
+# Match our words to the Afinn lexicon and score them
+xs <- wds %>% left_join(afinn, by="word") %>%
+  select(word, count, value) %>%
+  filter(!is.na(value )) 
+
+# Join the words back up to our titles and get a mean score
+x <- x %>% left_join(xs, by="word") %>%
+  mutate(value=ifelse(is.na(value), 0, value)) %>%
+  group_by(movieId) %>% 
+  summarize(sentiment=mean(value)) %>%  
+  ungroup() %>%
+  select(movieId, sentiment) %>%
+  left_join(movies, by="movieId") %>%
+  select(-title, -genres, -num, -release_year, -avg_rating)
+#  select(-title, -genres, -num, -all_of(cats), -release_year, -avg_rating)
+  
+movies <- movies %>% inner_join(x, by="movieId")
+
+knitr::kable(movies %>% 
+               arrange(-sentiment) %>% 
+               select(release_year, title, sentiment, genres) %>% 
+               head(), 
+             caption="High positive sentiment titles", booktabs=T) %>% 
+  kableExtra::kable_styling(full_width = F, latex_options = c("hold_position"))
+```
+
+```{r low_scoring_titles, echo=FALSE, message=FALSE, warning=FALSE}
+knitr::kable(movies %>%
+               arrange(sentiment) %>% 
+               select(release_year, title, sentiment, genres) %>% 
+               head(), 
+             caption="High negative sentiment titles", booktabs=T) %>% 
+  kableExtra::kable_styling(full_width = F, latex_options = c("hold_position"))
+
+```
+
+4.45 Now we have can look at relationships between sentiment scores and categories, we start by transforming our *movie* list from a row per *movie* with indicator variables by category, to a row by *movie* and category. We can use the union() function to deduplicate categories and movies, and then look at how sentiment scores vary across categories. These categories feature a *movie* if it has the category name in the genres list, this means an individual *movie* may be featured more than once in these counts. 
+
+``` {R sentiment_analysis, echo=FALSE, message=FALSE, warning=FALSE}
+# We dropped the category indicators, add them back here
+movies <- inner_join(movies, genre_list, by="genres")
+# First we start with an empty data frame, empty because true==false is 
+# always false, we will append 
+cat_sent <- movies %>% filter(TRUE == FALSE) %>% 
+  mutate(category = "") %>% 
+  select(-all_of(cats))
+# Loop through our categories, adding rows to the data frame where the indicator
+# for the category is 1. 
+for (cat in cats) {
+  #cat <- cats[1]
+  cf <- movies %>% 
+    filter(movies[, which(colnames(movies) == cat)] == 1) %>% 
+    mutate(category = cat) %>% 
+    select(-all_of(cats))
+  cat_sent <- union(cat_sent, cf)
+}
+
+# Get some summary stats by category
+mdn_cat_sent <- cat_sent %>% filter(sentiment != 0) %>% 
+  group_by(category) %>%
+  summarize(mdn_sent=median(sentiment), count=n()) %>%
+  ungroup %>%
+  select(category, mdn_sent, count)
+
+# A boxplot to investigate the relationship between sentiment scores and categories 
+cat_sent %>% filter(sentiment != 0 & num > 20) %>%
+  left_join(mdn_cat_sent, by="category") %>%
+  mutate(category=reorder(category, desc(mdn_sent))) %>% 
+  ggplot(aes(x=category, y=sentiment, group=category)) +
+    geom_boxplot(varwidth=TRUE) +
+    labs(title="Variation in title sentiment scores by category",
+      subtitle="Movies with no sentiment score have been removed") +
+    xlab("Category (movies counted towards all relevant catgories)") +
+    ylab("Sentiment score (based on RMSE and negativity)")
+
+```
+
+4.46 This distribution suggests a relationship between titles and categories as we might expect, the categories with the most positive sentiment scores are *Romance*, *Children*, *Musical* and *Animation*; whilst the most negative are *Horror*, *Mystery*, *Thriller*, and *Film Noir*. Do these relationships translate into patterns in *ratings* by category? Firstly lets look at how *ratings* are distributed by category.
+
+``` {R category_analysis, echo=FALSE, message=FALSE, warning=FALSE}
+cat_sent %>%  
+  ggplot(aes(x=avg_rating, weight=num, group=category)) +
+    geom_density(fill="royalblue")+
+    facet_wrap(.~category) +
+    scale_x_continuous(breaks=seq(0,5,1), limits=c(0,5)) +
+    labs(title="Distribution of ratings by category") +
+    xlab("Average rating")
+```
+
+4.47 These distributions are similar-but-different, reminiscent perhaps of ID shots of dolphin fins, and suggest that there may be differences in distribution of *ratings* across different categories. This would make sense since viewers may use these categories to select films they are more pre-disposed to enjoy, and this may, in part, explain why average *ratings* are above average: the reviews are average *ratings* across *movies* that viewers have watched, rather than average *ratings* across all movies. Notice that films in the categories *iMax*, *Mystery* and *War* appear to have two humps. 
+
+4.48 The chart below takes this a step further by looking at whether there are patterns in *ratings* and sentiment by category.
+
+``` {R sentiment_ratings, echo=FALSE, message=FALSE, warning=FALSE}
+cat_sent %>% filter(sentiment != 0 & num > 20) %>%
+  left_join(mdn_cat_sent, by="category") %>%
+  mutate(category=reorder(category, desc(mdn_sent))) %>% 
+  ggplot(aes(x=sentiment, y=avg_rating, group=category)) +
+    geom_point(aes(size=num), alpha=0.2) + 
+    geom_smooth(aes(weight=num), method = "lm") +
+    labs(title="Ratings and sentiment scores by category",
+       subtitle="Movies with no sentiment score have been removed") +
+    xlab("Sentiment score") +
+    ylab("Average rating") +
+    facet_wrap(~category)
+
+```
+
+4.49 Here we notice negative relationships between sentiment and *rating* for *Children*, *Horror* and *Film Noir*, and positive correlations for *Sci-Fi*, *War*, *Mystery* and *Westerns*. There does appear to be some influence here from outliers, especially in smaller categories such as Horror, where the *movie* *Godsend* has a high sentiment score and low average rating; this film also appears as an outlier in the *Thriller* and *Fantasy* categories, it was classed as *Drama|Fantasy|Horror|Thriller*. The distributions for categories *Thriller*, *Sci-Fi* and *Horror* appear to be strongly weighted towards more negative sentiment titles, having most of their points to the left in the chartlets above.
+
+4.50 Can we get sentiment scores for categories: do titles aligned with the category sentiment score more highly, for example? If we apply sentiment scoring we find that only a few categories get non-zero sentiments, and that the categories don't tally with the trends we saw earlier (see 4.49, for example), and that some categories, such as *Horror*, don't get sentiment scores when we might expect them to. 
+
+``` {R category_sentiment, echo=FALSE, message=FALSE, warning=FALSE}
+# Convert category names to lower case and join to the afinn data to get sentiments
+lc <- data.frame(word=cats) %>% 
+  mutate(word = str_to_lower(word)) %>%
+  filter(!word %in% stop_words$word ) %>%   # remove stop words
+  left_join(afinn, by="word") %>%
+  select(word, value) %>% 
+  filter(!is.na(value )) 
+
+# Sort categories by sentiment
+lc <- lc[order(-lc$value),]
+
+# Output list of categories with sentiment scores
+knitr::kable(lc, 
+             caption="Sentiment of categories", booktabs=T) %>% 
+  kableExtra::kable_styling(full_width = F, latex_options = c("hold_position"))
+
+```
+
+4.51 The chart below illustrates how sentiment scores vary by release year, there is a tendency for titles that can be scored to generate negative sentiments, with a few years in which positive sentiment titles were more common.
+
+``` {R sentiment_release_year, echo=FALSE, message=FALSE, warning=FALSE}
+movies %>% filter(sentiment != 0 & num > 20) %>%
+  mutate(ry=paste(release_year, "")) %>%
+  ggplot(aes(x=ry, y=sentiment)) +
+  #geom_point(alpha=0.2) +
+    geom_boxplot(varwidth=TRUE) +
+    scale_x_discrete(breaks=seq(1900,2020,10)) +
+    labs(title="Variation in title sentiment scores by release year",
+       subtitle="Movies with no sentiment score have been removed") +
+    xlab("Release year") +
+    ylab("Sentiment score") 
+
+```
+
+4.52 There is no obvious trend in sentiment over time, it doesn't appear that *movie* titles are getting any more extreme. The risk here is that the movie mix may be confounding any trend. We can explore this by splitting the data into categories and repeating the analysis.
+
+``` {R categories_release_year, echo=FALSE, message=FALSE, warning=FALSE}
+cat_sent %>% #filter(sentiment != 0 & num > 20) %>%
+  mutate(ry=paste(release_year, ""), has_sent=factor(abs(sign(sentiment)))) %>%
+  ggplot(aes(x=ry, y=sentiment, group=category, color=has_sent)) +
+    geom_point(alpha=0.2) +
+    geom_smooth(aes(weight=num), alpha=0.2, method = "lm", se=FALSE) +
+    scale_x_discrete(breaks=seq(1900,2020,10)) +
+    labs(title="Variation in sentiment scores by release year and category") +
+    xlab("Release year") +
+    ylab("Sentiment score") +
+    facet_wrap(~category)
+
+```
+
+4.53 Having split the data by category we don't see any marked trends, this is in large part due to the weight of *movies* in the middle ground, with sentiment scores of zero, which exert an inertial braking effect. If we were to exclude these, and we'd be hard pushed to justify this, we might see *Crime* titles appear to be getting less negative, or the opposite for *Musicals*. 
+\newpage
+
+### Summary of findings
+
+4.54 From our exploratory data analysis we have found some relationships that might be nice to know, and some that should be useful in modeling ratings. We have seen 
+
+* the mean rating is 3.51 (section 4.2)
+
+* half-star ratings were introduced on 12 Feb 2003 (4.29)
+
+* there is variability in between user rating of movies (4.5)
+
+* there is variability in between movie ratings (4.6)
+
+* super-users appear to give lower scores than users (4.14) and be less extreme in scoring.
+
+* blockbusters appear to have been rated as part of the recruitment of new members (4.20)
+
+* different genre categories have different distributions of ratings (4.38)
+
+* there is some relationship between sentiment scores and ratings by category (4.46)
+
+\newpage
+***
+## 5 Modeling methods
+
+### Modeling approach
+
+5.1 We start by following the approach taken in the lecture on recommendation systems and fit a linear model based on the user and movie effects, we have validated the motivation for this approach in our analysis of *users* (4.5) and *movies* (4.6) and we have reassured ourselves that there is no significant confounding of these variables.
+
+### Model assessment
+
+5.2 We will assess models based on the square root of the mean of the squared errors (RMSE), using the function provided in the lecture notes:
+
+``` {r rmse, echo=TRUE}
+
+# define a function to calculate rmse between observed and predicted data
+RMSE <- function(true_ratings, predicted_ratings){
+    sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+
+```
+
+A model will be better if it has a smaller RMSE. 
+
+### Model design 
+
+5.3 We have seen that a number of variables, both native and derived, in the data appear to influence ratings, so we will extend the linear movie recommendation model discussed in the course. This had the form:
+
+$$Y_{u,i} = \mu + b_i + b_u + \epsilon_{u,i}$$
+where $b_u$ is a user-specific effect, and $b_i$ is a movie effect and $\epsilon_{u,i}$ is a Normal error term.
+
+5.4 We extend this model to capture the predictive power of some of the other variables we have or can derive. In practice we test the predictive power of the model as we go along, here we will summarize the outcome of this process. 
+
+5.5 How can we capture trends in review ratings over time? In section 4.29 we saw that the introduction of half-star scores led to a step change in rating scores and so we select this as a variable to add to our model. This has a time component, so we will not use the timestamp, although this may have predictive value. 
+
+5.6 The movie titles include the release year and we saw, in 4.39, that this had an impact on ratings so we include this as a factor. We have included the character representation of the year as a factor, rather than as a numeric, since we want to capture the predictive power of the year without considering any linearity of relationship between release year and rating.
+
+5.7 We saw, in section 4.38, that a number of categories had an impact on ratings, of these we add variables to the model for categories *Film Noir*, *Action*, *Crime*, *Comedy*, *Drama*. We could have added more category variables but there is a diminishing return in adding more variables to the model. These categories have been chosen because of their relative size and the predictive power they appear to have. 
+
+### Validation hold-out 
+
+5.8 The source data has been segmented into training and validation segments, see 3.3 for details. We will develop and train the model using the full training dataset, holding out the validation dataset, which will only be used for validation. This separation also applies to the exploratory data analysis, which has only been performed on the training data. 
+
+5.9 Before testing, the validation data has been augmented with derived variables for half scores, based on the time stamp, and release year based on the title.
+
+5.10 The goodness of fit of the model has been evaluated based on the RMSE returned when applying the model to the validation dataset. 
+
+### Model improvements
+
+5.11 Improvements could potentially be made to the model by adding further variables, for example for further categories, the review year, or based on sentiment analysis. Interaction terms between variables would most likely be of benefit, for example between categories, and the time variables. 
+5.12 We have only considered a linear model, this has the benefit of being simple to understand and fit, especially for a large dataset, but this shouldn't be a limiting factor and we could consider fitting a more sophisticated model such as a random forest, given enough computing power.
+
+\newpage
+***
+## 6 Results
+
+### Modelling results
+
+6.1 The model discussed in the course produced an RMSE of 0.8653488, by extending this linear model we see very little improvement in the RMSE when we add a variable for the availability of half scores, however after adding indicator variables for selected categories we get and RMSE of 0.8652808, and achieve an RMSE score of 0.8649356 when release year is factored in.
+
+### Model performance
+
+6.3 The number of variables fitted increases the time required to fit the model and produce predictions. Using a simple model fitting function like lm() function would be likely to be much slower than using slightly "clunkier" iterative code to fit to successive residuals. Increasing the number of variables and interaction terms would further slow down the model. Using modelling techniques that are not tuned for large datasets might produce very poor performance.
+
+6.4 A typical recent run on a home PC (64 bit Windows 10 on an Intel i5 7400 @ 3.00 GHz with 16GB RAM) with  the model took 1 minute, 17 seconds a few minutes, this is a fraction of the time taken to run the full modelling script, which is slower because it includes downloading and processing the source data, rather than to the actual model fitting. 
+
+\newpage
+***
+## 7 Conclusion
+
+### Summary
+
+7.1 We have looked in some depth at the MovieLens data and this exploratory data analysis has allowed us to see some ways to extend and improve the recommendation model. The final model we present here is a linear model with variables for category, the existence of half scores, and the release year. This is a still a relatively small and simple model and there is scope to extend this model in terms of complexity to get a better fitting model.
+
+### Limitations
+
+7.2 The model works very well at predicting the rating scores for known movies by known users, this is valuable but may limit its use when the user and/or the movie is unkwown. Suppose we wanted to use the data to predict the likely rating for a new movie, we could do this by omitting the movie parameter $b_i$ from the equation, if we try this we get a much worse fit, with an RMSE of 0.991. Similarly if we omit the user parameter, $b_u$, we get an RMSE of 0.944. 
+
+7.3 Once we had reviews for new movies we could refit the model based on this new data. This is potentially time consuming as we would need to reload and rerun the modelling steps. It would be easier if we could update the parameters without the need to rerun the entire model. Further it would be nice if we could establish some certainty over some parameters, so that we could rely on the effect of a category being relatively stable over time - there is the potential that the sign of a parameter could chnge in refitting because there are no constraints in the model.
+
+### Further work
+
+7.3 As pointed to in the limitations section there could be value in developing a predictive model that was tailored to handling unseen data. This would likely want to consider trends in ratings over time and focus more attention on categories and interactions between categories. 
+
+7.4 The sophistication in modelling users could also be improved from the current model that effectively assigns each user a positive or negative score, to assigning the user a score in different categories, for example, interactions between user and category. 
+
+7.5 There is potentially value in exploring the sequencing of reviews, especially if this reflects the order in which users view movies: one can imagine that the order in which one watches a series might influence the user's enjoyment, being able to follow a story arc, for example. 
+
+7.6 The MovieLens data scratches the surface of what could be analysed in relation to films. There is an enormous amount of data that could be associated with users and movies that we don't have: 
+
+* could gender play a role in movie rating, would this vary across categories? 
+
+* does the star quality of some actors translate into better reviews?
+
+* does nationality or language influence ratings for some users?
+
+* do people enjoy films more when they watch them alone?
+
+* how do MovieLens ratings compare to other platforms?
+
+* do some directors produce better or worse movies?
+
+* do bigger budgets translate into better reviews?
+
+* does popcorn improve ratings, salt or sweet?
+
+* do longer films get better reviews?
+
+***
